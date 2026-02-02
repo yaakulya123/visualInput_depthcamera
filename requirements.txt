@@ -1,0 +1,19 @@
+# Liquid Stillness - Dependencies
+# Python 3.11+ required
+
+# Core computer vision
+opencv-python>=4.8.0
+numpy>=1.24.0
+
+# Body/pose tracking (for breathing detection on macOS)
+mediapipe==0.10.9  # Use 0.10.9 for solutions API compatibility
+
+# Signal processing
+scipy>=1.11.0
+
+# Visualization helpers
+matplotlib>=3.7.0
+
+# NOTE: pyrealsense2 is NOT available for macOS ARM64
+# For depth-based detection, run on Linux/Windows or Linux VM with USB passthrough
+# See requirements-depth.txt for optional depth dependencies

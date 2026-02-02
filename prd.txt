@@ -1,0 +1,162 @@
+📄 Product Requirement Document (PRD)
+
+Project Name: Liquid Stillness
+Version: 1.0
+Hardware: Intel RealSense D435
+Output: Ceiling Projection
+1. Executive Summary
+
+Liquid Stillness is an immersive biofeedback installation designed to induce a meditative state in a user lying on the floor.
+
+By utilizing the sub-millimeter depth precision and infrared capabilities of the Intel RealSense D435, the system tracks the user's chest expansion (breathing) and physical stillness. This biometric data drives a real-time, generative fluid simulation projected onto the ceiling.
+
+The experience creates a seamless loop: The user breathes to calm the fluid; the calm fluid encourages the user to breathe.
+2. User Journey & Experience
+Phase 1: The Entry (Immersion)
+
+    The user enters a dimly lit or pitch-black room (utilizing the D435’s IR capabilities).
+
+    They lie down on a mat/floor looking up at the ceiling.
+
+    Initial State: The ceiling projection shows a "Neutral State"—a gentle, drifting blue fluid with slight turbulence, representing the ambient energy of the room.
+
+Phase 2: The Calibration (Connection)
+
+    As the user settles, the system isolates their body geometry from the floor.
+
+    The fluid on the ceiling seems to "notice" them. The fluid currents begin to flow around the silhouette of their body, creating a digital reflection of their presence.
+
+Phase 3: The Interaction (Breathing & Motion)
+
+    The Ripple: Every time the user moves a limb (restlessness), the fluid reacts with high-velocity ripples, scattering the light.
+
+    The Breath: As the user breathes, the fluid pulses.
+
+        Inhale: The fluid expands and brightens (Chest rises).
+
+        Exhale: The fluid contracts and deepens in color (Chest falls).
+
+    The Feedback: Fast, shallow breathing creates choppy, chaotic water. Slow, deep breathing creates long, smooth, hypnotic waves.
+
+Phase 4: The Transcendence (The Golden State)
+
+    If the system detects Deep Rhythm (slow breathing) + Physical Stillness for >30 seconds:
+
+    The fluid viscosity increases (becomes honey-like).
+
+    The color palette shifts from Indigo/Blue to Luminescent Gold.
+
+    This visual reward reinforces the user's state of calm.
+
+3. Functional Requirements
+A. The "Bio-Sensor" Engine (Input)
+
+The system must use the Intel RealSense D435 to capture two distinct streams of data without physical contact.
+
+    Chest Volume Tracking (Respiratory):
+
+        Mechanism: The camera must identify the "highest point" of the torso (the chest/belly region).
+
+        Precision: It must detect Z-axis (depth) variance of 5mm - 10mm (standard breathing amplitude).
+
+        Signal Processing: The raw depth signal must be smoothed to create a clean "Sine Wave" representing the breath cycle (Inhale/Exhale).
+
+    Global Body Stillness (Restlessness):
+
+        Mechanism: Frame-to-frame subtraction (comparing Depth Frame A to Depth Frame B).
+
+        Logic: Any pixel change >2mm implies movement.
+
+        Metric: Generate a "Jitter Score." High Jitter = Turbulence. Low Jitter = Laminar Flow.
+
+B. The "Fluid" Engine (Output)
+
+A generative visual system (likely shader-based) that renders a liquid simulation.
+
+    The Canvas: The projection acts as a "pool" of water on the ceiling.
+
+    The Obstacle: The user's body shape (Depth Mask) acts as a physical object inside this pool.
+
+    Dynamic Parameters:
+
+        Turbulence: Linked to Body Jitter.
+
+        Pulse/Brightness: Linked to Chest Height (Breathing).
+
+        Viscosity (Thickness): Linked to Consistency of Rhythm.
+
+        Color Grading: Gradient map shifts based on the "Calm Duration."
+
+4. Technical Architecture
+Hardware Setup
+
+    Camera Mount: Ceiling-mounted (Top-Down view), centered over the mat. Distance ~2.0m to 2.5m from floor.
+
+    Lighting: Room can be completely dark. The D435 Infrared Emitter must be set to High Power to see the chest movement in the dark.
+
+    Projector: Short-throw projector aimed at the ceiling.
+
+Software Logic Flow
+
+    Depth Capture: Capture 16-bit Depth frames at 30 FPS.
+
+    Background Removal: Crop everything further than 20cm from the floor (isolating the human).
+
+    ROI Locking: Algorithmically find the center of mass, then offset slightly up to find the Chest Region of Interest (ROI).
+
+    Signal Extraction:
+
+        Calculate average depth within Chest ROI per frame.
+
+        Store in a buffer (last 100 frames) to determine the "Breathing Wave."
+
+    Fluid Physics: Pass the "Breathing Wave" and "Body Mask" into a GPU-accelerated Fluid Solver (e.g., Navier-Stokes simulation).
+
+    Rendering: Output the final visual to the projector.
+
+5. Visual & Audio Direction
+Visuals (The "Liquid")
+
+    Style: Abstract, bioluminescent, ethereal. NOT realistic water, but "spirit water."
+
+    Palette:
+
+        Anxious/Moving: Dark Purple, Deep Indigo, High Contrast shadows.
+
+        Calm/Breathing: Cyan, Teal, Soft White highlights.
+
+        Deep Meditation: Gold, Amber, Warm White.
+
+Audio (The "Harmonic Stack" - Reuse)
+
+    Note: Using existing libraries from your previous project.
+
+    The breathing cycle drives the volume swelling of the tracks.
+
+    Inhale: Volume swells slightly (Tension).
+
+    Exhale: Volume releases/fades (Release).
+
+    This synchronizes the "Orchestra" to the user's lungs.
+
+6. Constraints & Risks
+
+    Clothing Interference: Thick sweaters or puffer jackets may mask the 5mm chest movement.
+
+        Mitigation: Advise users to remove heavy outer layers, or rely more on the "Stillness" metric if breathing is undetectable.
+
+    Noise/Flicker: Depth cameras can have "salt and pepper" noise.
+
+        Mitigation: Aggressive temporal smoothing (averaging frames) is required to ensure the breathing signal doesn't look jittery.
+
+    Multi-User Confusion: If two people lie down, the chest tracker might get confused.
+
+        Mitigation: For V1.0, limit to Single User. For V2.0, implement "Blob Tracking" to assign separate breathing monitors to separate shapes.
+
+7. Success Metrics
+
+    Latency: The visual fluid must respond to the breath within <200ms. If the lag is too long, the user will feel disconnected.
+
+    Resolution: The system must distinguish between a shallow breath (casual) and a deep breath (meditative).
+
+    Experience: The user reports feeling that the room is "breathing with them."
