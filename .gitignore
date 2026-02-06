@@ -28,6 +28,7 @@ outputs/
 *.png
 *.mp4
 *.avi
+*.pt
 
 # Diagnostics
 diagnostic_results.json
