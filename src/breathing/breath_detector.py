@@ -43,10 +43,10 @@ class BreathingDetector:
     Real-time breathing detection from depth or pose data.
 
     Usage:
-        detector = BreathingDetector(mode=DetectionMode.POSE)
+        detector = BreathingDetector(mode=DetectionMode.DEPTH)
 
         # In frame loop:
-        state = detector.update(frame, landmarks=pose_landmarks)
+        state = detector.update(frame, depth_frame=depth_data)
         print(f"Breathing: {state.signal:.2f}, Phase: {state.phase}")
     """
 
@@ -54,13 +54,15 @@ class BreathingDetector:
         self,
         mode: DetectionMode = DetectionMode.POSE,
         buffer_size: int = 100,         # Frames to buffer (~3.3s at 30fps)
-        smoothing_alpha: float = 0.3,   # Exponential smoothing factor
+        smoothing_alpha: float = 0.2,   # Exponential smoothing factor
         min_amplitude_mm: float = 3.0,  # Minimum detectable breath (mm)
+        depth_scale: float = 0.001,     # RealSense depth scale (meters per unit)
     ):
         self.mode = mode
         self.buffer_size = buffer_size
         self.smoothing_alpha = smoothing_alpha
         self.min_amplitude_mm = min_amplitude_mm
+        self.depth_scale = depth_scale
 
         # Signal buffer for breathing wave analysis
         self.signal_buffer = deque(maxlen=buffer_size)
@@ -68,38 +70,33 @@ class BreathingDetector:
 
         # Smoothed values
         self.smoothed_value = None
-        self.baseline = None  # Running baseline (neutral chest position)
+        self.baseline = None
 
         # Phase detection
         self.last_phase = "hold"
         self.last_peak_time = time.time()
-        self.breath_intervals = deque(maxlen=10)  # For BPM calculation
+        self.breath_intervals = deque(maxlen=10)
 
         # Calibration
-        self.calibration_frames = 60  # Frames to calibrate baseline
+        self.calibration_frames = 60
         self.calibration_values = []
         self.is_calibrated = False
 
-        # ROI for depth mode (will be set during detection)
-        self.chest_roi = None  # (x, y, w, h)
+        # ROI for depth mode
+        self.chest_roi = None
+
+        # Adaptive parameters based on distance
+        self.current_distance_mm = 0.0
+        self.adaptive_threshold = 0.5
+        self.adaptive_smoothing = smoothing_alpha
 
     def update(
         self,
         frame: np.ndarray,
         depth_frame: Optional[np.ndarray] = None,
-        landmarks=None,  # MediaPipe pose landmarks
+        landmarks=None,
     ) -> BreathingState:
-        """
-        Process a frame and return current breathing state.
-
-        Args:
-            frame: RGB/BGR frame from camera
-            depth_frame: 16-bit depth frame (DEPTH mode only)
-            landmarks: MediaPipe pose landmarks (POSE mode only)
-
-        Returns:
-            BreathingState with current breathing metrics
-        """
+        """Process a frame and return current breathing state."""
         current_time = time.time()
 
         # Get raw measurement based on mode
@@ -108,14 +105,9 @@ class BreathingDetector:
         elif self.mode == DetectionMode.POSE and landmarks is not None:
             raw_value, confidence = self._measure_pose(landmarks, frame)
         else:
-            # No valid input
             return BreathingState(
-                signal=0.0,
-                raw_value=0.0,
-                phase="hold",
-                breath_rate=0.0,
-                amplitude=0.0,
-                confidence=0.0,
+                signal=0.0, raw_value=0.0, phase="hold",
+                breath_rate=0.0, amplitude=0.0, confidence=0.0,
                 timestamp=current_time
             )
 
@@ -124,13 +116,11 @@ class BreathingDetector:
             return self._calibrate(raw_value, confidence, current_time)
 
         # Apply exponential smoothing
+        alpha = self.adaptive_smoothing
         if self.smoothed_value is None:
             self.smoothed_value = raw_value
         else:
-            self.smoothed_value = (
-                self.smoothing_alpha * raw_value +
-                (1 - self.smoothing_alpha) * self.smoothed_value
-            )
+            self.smoothed_value = alpha * raw_value + (1 - alpha) * self.smoothed_value
 
         # Store in buffer
         self.signal_buffer.append(self.smoothed_value)
@@ -155,79 +145,98 @@ class BreathingDetector:
     def _measure_depth(
         self, depth_frame: np.ndarray, rgb_frame: np.ndarray
     ) -> Tuple[float, float]:
-        """
-        Measure chest height from depth frame.
-
-        Returns: (height_mm, confidence)
-        """
+        """Measure chest height from depth frame."""
         h, w = depth_frame.shape[:2]
 
         # If no ROI set, use center region
         if self.chest_roi is None:
-            # Default: center 30% of frame (assuming person is centered)
             roi_w = int(w * 0.3)
             roi_h = int(h * 0.2)
             roi_x = (w - roi_w) // 2
-            roi_y = int(h * 0.3)  # Upper-middle (chest area from top-down)
+            roi_y = int(h * 0.3)
             self.chest_roi = (roi_x, roi_y, roi_w, roi_h)
 
         rx, ry, rw, rh = self.chest_roi
+
+        # Clamp ROI to frame bounds
+        rx = max(0, min(rx, w - 1))
+        ry = max(0, min(ry, h - 1))
+        rw = min(rw, w - rx)
+        rh = min(rh, h - ry)
+
+        if rw <= 0 or rh <= 0:
+            return 0.0, 0.0
+
         roi = depth_frame[ry:ry+rh, rx:rx+rw]
 
-        # Filter out invalid depth values (0 = no data)
+        # Filter out invalid depth values
         valid_mask = roi > 0
         if not np.any(valid_mask):
             return 0.0, 0.0
 
         valid_depths = roi[valid_mask]
 
-        # Use median of top 20% closest points (chest surface)
+        # Use median of closest 30% points (chest surface)
         sorted_depths = np.sort(valid_depths)
-        top_20_percent = sorted_depths[:len(sorted_depths) // 5]
+        top_percent = sorted_depths[:max(1, len(sorted_depths) * 30 // 100)]
 
-        if len(top_20_percent) == 0:
+        if len(top_percent) == 0:
             return 0.0, 0.0
 
-        chest_depth = np.median(top_20_percent)
-        confidence = min(1.0, len(top_20_percent) / 100)
+        chest_depth_raw = np.median(top_percent)
+        chest_depth_mm = float(chest_depth_raw) * self.depth_scale * 1000.0
 
-        return float(chest_depth), confidence
+        # Update distance and adaptive parameters
+        self.current_distance_mm = chest_depth_mm
+        self._update_adaptive_parameters()
+
+        confidence = min(1.0, len(top_percent) / 100)
+        return chest_depth_mm, confidence
 
     def _measure_pose(
         self, landmarks, rgb_frame: np.ndarray
     ) -> Tuple[float, float]:
-        """
-        Measure chest position from MediaPipe pose landmarks.
-        Uses shoulder landmarks (11, 12) to approximate chest movement.
-
-        Returns: (y_position, confidence)
-        """
+        """Measure chest position from pose landmarks."""
         if landmarks is None:
             return 0.0, 0.0
 
-        # Get shoulder landmarks
-        # MediaPipe landmark indices: 11 = left shoulder, 12 = right shoulder
         try:
             left_shoulder = landmarks.landmark[11]
             right_shoulder = landmarks.landmark[12]
         except (IndexError, AttributeError):
             return 0.0, 0.0
 
-        # Average visibility as confidence
         confidence = (left_shoulder.visibility + right_shoulder.visibility) / 2
-
         if confidence < 0.5:
             return 0.0, 0.0
 
-        # Average Y position of shoulders (inverted: lower Y = higher in frame)
-        # For top-down view, we use Y as proxy for chest height
         avg_y = (left_shoulder.y + right_shoulder.y) / 2
-
-        # Convert to pixel coordinates for consistency
         h, w = rgb_frame.shape[:2]
         y_pixels = avg_y * h
 
         return y_pixels, confidence
+
+    def _update_adaptive_parameters(self):
+        """Adjust parameters based on distance."""
+        d = self.current_distance_mm
+        if d <= 0:
+            return
+
+        if d < 500:
+            self.adaptive_threshold = 0.3
+            self.adaptive_smoothing = 0.25
+        elif d < 1000:
+            self.adaptive_threshold = 0.5
+            self.adaptive_smoothing = 0.2
+        elif d < 1500:
+            self.adaptive_threshold = 0.8
+            self.adaptive_smoothing = 0.15
+        elif d < 2500:
+            self.adaptive_threshold = 1.2
+            self.adaptive_smoothing = 0.1
+        else:
+            self.adaptive_threshold = 2.0
+            self.adaptive_smoothing = 0.08
 
     def _calibrate(
         self, raw_value: float, confidence: float, current_time: float
@@ -237,20 +246,15 @@ class BreathingDetector:
             self.calibration_values.append(raw_value)
 
         if len(self.calibration_values) >= self.calibration_frames:
-            # Calculate baseline as median
             self.baseline = np.median(self.calibration_values)
             self.smoothed_value = self.baseline
             self.is_calibrated = True
-            print(f"[BreathDetector] Calibration complete. Baseline: {self.baseline:.2f}")
+            print(f"[BreathDetector] Calibration complete. Baseline: {self.baseline:.2f}mm")
 
         progress = len(self.calibration_values) / self.calibration_frames
         return BreathingState(
-            signal=0.0,
-            raw_value=raw_value,
-            phase="calibrating",
-            breath_rate=0.0,
-            amplitude=progress,  # Use amplitude to show calibration progress
-            confidence=confidence,
+            signal=0.0, raw_value=raw_value, phase="calibrating",
+            breath_rate=0.0, amplitude=progress, confidence=confidence,
             timestamp=current_time
         )
 
@@ -259,53 +263,64 @@ class BreathingDetector:
         if len(self.signal_buffer) < 10:
             return 0.0
 
-        # Get recent range
-        recent = list(self.signal_buffer)
+        # Use recent window for dynamic range
+        recent_window = min(90, len(self.signal_buffer))  # ~3 seconds
+        recent = list(self.signal_buffer)[-recent_window:]
+
         min_val = np.min(recent)
         max_val = np.max(recent)
         range_val = max_val - min_val
 
-        if range_val < 1e-6:  # Avoid division by zero
+        # Need minimum range to normalize
+        min_range = 1.0 if self.mode == DetectionMode.DEPTH else 2.0
+        if range_val < min_range:
+            # Use baseline-based normalization
+            if self.baseline is not None:
+                deviation = self.baseline - self.smoothed_value
+                scale = 10.0 if self.mode == DetectionMode.DEPTH else 30.0
+                return float(np.clip(deviation / scale, -1, 1))
             return 0.0
 
-        # Normalize: -1 (exhale/min) to +1 (inhale/max)
+        # Normalize current value
         current = self.smoothed_value
         normalized = 2 * (current - min_val) / range_val - 1
 
-        # For POSE mode, invert (lower Y = inhale = higher chest)
-        if self.mode == DetectionMode.POSE:
+        # Invert for depth mode (lower depth = inhale = positive)
+        if self.mode == DetectionMode.DEPTH:
             normalized = -normalized
 
         return float(np.clip(normalized, -1, 1))
 
     def _detect_phase(self, signal: float) -> str:
-        """Detect breathing phase from signal derivative."""
-        if len(self.signal_buffer) < 3:
+        """Detect breathing phase from signal."""
+        if len(self.signal_buffer) < 5:
             return "hold"
 
-        # Calculate derivative (signal change)
-        recent = list(self.signal_buffer)[-5:]
-        if len(recent) < 2:
+        # Get recent trend
+        recent = list(self.signal_buffer)[-8:]
+        if len(recent) < 4:
             return "hold"
 
-        derivative = recent[-1] - recent[0]
+        # Calculate derivative (trend)
+        first_half = np.mean(recent[:len(recent)//2])
+        second_half = np.mean(recent[len(recent)//2:])
+        derivative = first_half - second_half  # Inverted for depth
 
-        # Thresholds for phase detection
-        threshold = 0.5  # Minimum change to register as inhale/exhale
+        # Threshold based on distance
+        threshold = self.adaptive_threshold
 
         if derivative > threshold:
-            new_phase = "inhale" if self.mode == DetectionMode.DEPTH else "exhale"
+            new_phase = "inhale"
         elif derivative < -threshold:
-            new_phase = "exhale" if self.mode == DetectionMode.DEPTH else "inhale"
+            new_phase = "exhale"
         else:
             new_phase = "hold"
 
         # Track breath cycles for BPM
         if self.last_phase == "inhale" and new_phase == "exhale":
-            # Completed one breath cycle
             current_time = time.time()
             interval = current_time - self.last_peak_time
-            if 0.5 < interval < 10:  # Valid breath interval (6-120 BPM)
+            if 0.5 < interval < 10:
                 self.breath_intervals.append(interval)
             self.last_peak_time = current_time
 
@@ -316,7 +331,6 @@ class BreathingDetector:
         """Calculate breaths per minute from intervals."""
         if len(self.breath_intervals) < 2:
             return 0.0
-
         avg_interval = np.mean(self.breath_intervals)
         if avg_interval > 0:
             return 60.0 / avg_interval
@@ -326,22 +340,14 @@ class BreathingDetector:
         """Calculate normalized breathing amplitude."""
         if len(self.signal_buffer) < 30:
             return 0.0
-
         recent = list(self.signal_buffer)
         amplitude = np.max(recent) - np.min(recent)
-
-        # Normalize based on expected range
         if self.mode == DetectionMode.DEPTH:
-            # Expect 5-15mm for normal breathing
-            normalized = np.clip(amplitude / 15.0, 0, 1)
-        else:
-            # Pose mode: pixels, depends on resolution
-            normalized = np.clip(amplitude / 50.0, 0, 1)
-
-        return float(normalized)
+            return float(np.clip(amplitude / 15.0, 0, 1))
+        return float(np.clip(amplitude / 50.0, 0, 1))
 
     def reset(self):
-        """Reset detector state (for recalibration)."""
+        """Reset detector state."""
         self.signal_buffer.clear()
         self.time_buffer.clear()
         self.smoothed_value = None
@@ -352,5 +358,5 @@ class BreathingDetector:
         self.chest_roi = None
 
     def set_chest_roi(self, x: int, y: int, w: int, h: int):
-        """Manually set chest region of interest (for depth mode)."""
+        """Manually set chest region of interest."""
         self.chest_roi = (x, y, w, h)
