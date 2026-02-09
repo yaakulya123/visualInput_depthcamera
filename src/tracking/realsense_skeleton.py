@@ -232,10 +232,11 @@ class RealSenseSkeletonTracker:
             return False
 
         # Try different configurations in order of preference
+        # IR first: same sensor module as depth, no extra USB power on macOS
         configs_to_try = [
+            ("infrared", rs.format.y8, rs.stream.infrared),
             ("bgr8", rs.format.bgr8, rs.stream.color),
             ("rgb8", rs.format.rgb8, rs.stream.color),
-            ("infrared", rs.format.y8, rs.stream.infrared),
         ]
 
         profile = None
@@ -284,6 +285,14 @@ class RealSenseSkeletonTracker:
             depth_sensor = profile.get_device().first_depth_sensor()
             self.depth_scale = depth_sensor.get_depth_scale()
             print(f"Depth scale: {self.depth_scale}")
+
+            # Disable IR projector if using IR stream (dot pattern confuses MediaPipe)
+            if self.color_format == "infrared":
+                try:
+                    depth_sensor.set_option(rs.option.emitter_enabled, 0)
+                    print("IR projector disabled (clean image for pose detection)")
+                except Exception as e:
+                    print(f"Warning: Could not disable IR emitter: {e}")
 
             # Get depth intrinsics for 3D projection
             depth_profile = profile.get_stream(rs.stream.depth)

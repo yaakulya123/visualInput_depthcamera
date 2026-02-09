@@ -1,8 +1,13 @@
 #!/usr/bin/env python3
 """
-Simple RealSense Skeleton Test - Minimal version to avoid crashes
+RealSense Skeleton + Breathing Detection
+
+Uses IR stream (no projector dots) + MediaPipe pose + depth fusion.
+Median + EMA smoothing for responsive, clean breathing signal.
+Peak detection for BPM calculation.
 
 Run with: sudo ./venv/bin/python src/tracking/test_skeleton_simple.py
+Controls: q=quit, r=reset, s=screenshot
 """
 
 import sys
@@ -28,135 +33,392 @@ except ImportError:
 
 
 class BreathingDetector:
-    """Simple breathing phase detector."""
+    """
+    Breathing detector: median filter + EMA smoothing + peak-based BPM.
+    Responsive and accurate - no heavy filters that add latency.
+    """
 
     def __init__(self):
-        self.buffer = deque(maxlen=20)
-        self.smoothed = deque(maxlen=10)
+        self.raw_buffer = deque(maxlen=200)     # ~10s at 20fps
+        self.smoothed = deque(maxlen=200)
+        self.timestamps = deque(maxlen=200)
+
+        # State
         self.phase = "calibrating"
         self.signal = 0.0
+        self.display_signal = 0.0   # Lerp-interpolated for smooth circle
+        self.bpm = 0.0
         self.breath_count = 0
-        self.last_phase = "hold"
 
-    def update(self, depth_mm):
-        self.buffer.append(depth_mm)
+        # Phase detection with debounce
+        self._last_raw_phase = "hold"
+        self._phase_hold_count = 0
+        self._confirmed_phase = "hold"
 
-        if len(self.buffer) < 5:
+        # Peak detection for BPM
+        self._peak_times = deque(maxlen=20)
+        self._trough_times = deque(maxlen=20)
+        self._prev_smoothed = None
+        self._prev_derivative = 0.0
+        self._was_rising = False
+
+    def update(self, depth_mm, timestamp=None):
+        if timestamp is None:
+            timestamp = time.time()
+
+        self.raw_buffer.append(depth_mm)
+        self.timestamps.append(timestamp)
+
+        if len(self.raw_buffer) < 10:
             self.phase = "calibrating"
             return
 
-        # Simple moving average
-        avg = np.mean(list(self.buffer)[-5:])
+        # Step 1: Median of last 7 samples (kills spike noise)
+        median_val = np.median(list(self.raw_buffer)[-7:])
+
+        # Step 2: EMA on top (smooth but responsive)
+        if len(self.smoothed) > 0:
+            alpha = 0.15
+            avg = alpha * median_val + (1 - alpha) * self.smoothed[-1]
+        else:
+            avg = median_val
         self.smoothed.append(avg)
 
-        if len(self.smoothed) < 3:
+        if len(self.smoothed) < 8:
+            self.phase = "calibrating"
             return
 
-        # Calculate trend
+        # --- Derivative for phase detection (8 frames apart) ---
         recent = list(self.smoothed)
-        derivative = recent[-1] - recent[-3]
+        derivative = recent[-1] - recent[-8]
 
-        # Detect phase (negative derivative = moving closer = inhale)
-        if derivative < -0.3:
-            new_phase = "inhale"
-        elif derivative > 0.3:
-            new_phase = "exhale"
+        # Phase detection: threshold at 2mm to ignore noise
+        if derivative < -2.0:
+            raw_phase = "inhale"
+        elif derivative > 2.0:
+            raw_phase = "exhale"
         else:
-            new_phase = "hold"
+            raw_phase = "hold"
 
-        # Count breaths
-        if self.last_phase == "inhale" and new_phase == "exhale":
-            self.breath_count += 1
+        # Debounce: 3 consistent frames to switch
+        if raw_phase == self._last_raw_phase:
+            self._phase_hold_count += 1
+        else:
+            self._phase_hold_count = 1
+            self._last_raw_phase = raw_phase
 
-        self.last_phase = new_phase
-        self.phase = new_phase
+        if self._phase_hold_count >= 3 and raw_phase != self._confirmed_phase:
+            old_phase = self._confirmed_phase
+            self._confirmed_phase = raw_phase
 
-        # Normalized signal for circle size
-        if len(self.buffer) >= 10:
-            buf = list(self.buffer)
+            # Count breath on inhale->exhale
+            if old_phase == "inhale" and raw_phase == "exhale":
+                self.breath_count += 1
+                self._peak_times.append(timestamp)
+
+            # Also track exhale->inhale for BPM
+            if old_phase == "exhale" and raw_phase == "inhale":
+                self._trough_times.append(timestamp)
+
+        self.phase = self._confirmed_phase
+
+        # --- BPM from breath cycle intervals ---
+        self._update_bpm()
+
+        # --- Normalized signal for circle (-1 to +1) ---
+        if len(self.smoothed) >= 30:
+            buf = list(self.smoothed)[-90:]
             min_d, max_d = min(buf), max(buf)
             range_d = max_d - min_d if max_d > min_d else 1
+            # Invert: closer = inhale = positive signal
             self.signal = -((avg - min_d) / range_d * 2 - 1)
-            self.signal = max(-1, min(1, self.signal))
+            self.signal = max(-1.0, min(1.0, self.signal))
+
+        # Smooth lerp for circle animation
+        self.display_signal += (self.signal - self.display_signal) * 0.25
+
+    def _update_bpm(self):
+        """BPM from inhale->exhale transition intervals."""
+        times = list(self._peak_times)
+        if len(times) >= 2:
+            recent = times[-6:]
+            intervals = [recent[i+1] - recent[i] for i in range(len(recent)-1)]
+            valid = [iv for iv in intervals if 1.5 < iv < 12.0]
+            if valid:
+                self.bpm = 60.0 / np.mean(valid)
+
+    def reset(self):
+        self.raw_buffer.clear()
+        self.smoothed.clear()
+        self.timestamps.clear()
+        self.phase = "calibrating"
+        self.signal = 0.0
+        self.display_signal = 0.0
+        self.bpm = 0.0
+        self.breath_count = 0
+        self._confirmed_phase = "hold"
+        self._last_raw_phase = "hold"
+        self._phase_hold_count = 0
+        self._peak_times.clear()
+        self._trough_times.clear()
+
+
+def draw_breathing_circle(display, breath, x, y):
+    """Animated breathing circle with glow."""
+    base_r = 55
+    radius = int(base_r + breath.display_signal * 25)
+    radius = max(20, radius)
+
+    # Phase colors (BGR)
+    colors = {
+        "inhale":      ((200, 255, 100), (100, 200, 50)),
+        "exhale":      ((180, 140, 255), (120, 80, 200)),
+        "calibrating": ((120, 120, 120), (60, 60, 60)),
+        "hold":        ((200, 200, 180), (100, 100, 90)),
+    }
+    primary, glow = colors.get(breath.phase, colors["hold"])
+
+    # Glow rings
+    cv2.circle(display, (x, y), radius + 12, glow, 2, cv2.LINE_AA)
+    cv2.circle(display, (x, y), radius + 6, primary, 2, cv2.LINE_AA)
+
+    # Filled circle with transparency
+    overlay = display.copy()
+    cv2.circle(overlay, (x, y), radius, primary, -1, cv2.LINE_AA)
+    cv2.addWeighted(overlay, 0.6, display, 0.4, 0, display)
+
+    # Inner highlight
+    inner_r = max(5, radius - 20)
+    highlight = tuple(min(255, c + 60) for c in primary)
+    cv2.circle(display, (x - 5, y - 5), inner_r // 2, highlight, -1, cv2.LINE_AA)
+
+    # Phase label
+    label = breath.phase.upper()
+    ts = cv2.getTextSize(label, cv2.FONT_HERSHEY_SIMPLEX, 0.7, 2)[0]
+    cv2.putText(display, label, (x - ts[0]//2, y + radius + 30),
+                cv2.FONT_HERSHEY_SIMPLEX, 0.7, primary, 2, cv2.LINE_AA)
+
+    # BPM or breath count above
+    if breath.bpm > 0:
+        text = f"{breath.bpm:.0f} BPM"
+    else:
+        text = f"Breaths: {breath.breath_count}"
+    ts = cv2.getTextSize(text, cv2.FONT_HERSHEY_SIMPLEX, 0.5, 1)[0]
+    cv2.putText(display, text, (x - ts[0]//2, y - radius - 15),
+                cv2.FONT_HERSHEY_SIMPLEX, 0.5, (200, 200, 200), 1, cv2.LINE_AA)
+
+
+def draw_waveform(display, breath, x, y, w, h):
+    """Waveform showing smoothed signal with filled area."""
+    # Background
+    cv2.rectangle(display, (x, y), (x + w, y + h), (15, 15, 15), -1)
+    cv2.rectangle(display, (x, y), (x + w, y + h), (60, 60, 60), 1)
+
+    mid_y = y + h // 2
+    cv2.line(display, (x, mid_y), (x + w, mid_y), (40, 40, 40), 1)
+
+    if len(breath.smoothed) < 3:
+        return
+
+    data = list(breath.smoothed)
+    mean_d = np.mean(data)
+    max_dev = max(max(abs(d - mean_d) for d in data), 0.5)
+
+    # Build points
+    n = len(data)
+    points = []
+    for i, val in enumerate(data):
+        px = x + int((i / max(n - 1, 1)) * w)
+        norm = (val - mean_d) / max_dev
+        py = mid_y - int(norm * h * 0.4)
+        py = max(y + 2, min(y + h - 2, py))
+        points.append((px, py))
+
+    # Filled area
+    if len(points) >= 2:
+        fill_pts = [(points[0][0], mid_y)] + points + [(points[-1][0], mid_y)]
+        overlay = display.copy()
+        cv2.fillPoly(overlay, [np.array(fill_pts, dtype=np.int32)], (0, 80, 40))
+        cv2.addWeighted(overlay, 0.35, display, 0.65, 0, display)
+
+    # Main line (teal)
+    for i in range(1, len(points)):
+        cv2.line(display, points[i-1], points[i], (0, 220, 180), 2, cv2.LINE_AA)
+
+    # Raw signal faintly
+    if len(breath.raw_buffer) > 2:
+        raw = list(breath.raw_buffer)
+        raw_mean = np.mean(raw)
+        raw_range = max(max(raw) - min(raw), 1)
+        nr = len(raw)
+        for i in range(1, nr):
+            px1 = x + int(((i-1) / max(nr-1, 1)) * w)
+            px2 = x + int((i / max(nr-1, 1)) * w)
+            n1 = (raw[i-1] - raw_mean) / raw_range
+            n2 = (raw[i] - raw_mean) / raw_range
+            py1 = mid_y - int(n1 * h * 0.35)
+            py2 = mid_y - int(n2 * h * 0.35)
+            py1 = max(y+2, min(y+h-2, py1))
+            py2 = max(y+2, min(y+h-2, py2))
+            cv2.line(display, (px1, py1), (px2, py2), (50, 50, 50), 1)
+
+    # Label + range info
+    range_mm = max(data) - min(data)
+    cv2.putText(display, f"Chest Depth (smoothed) | Range: {range_mm:.1f}mm", (x + 5, y - 5),
+                cv2.FONT_HERSHEY_SIMPLEX, 0.35, (0, 180, 150), 1, cv2.LINE_AA)
+
+
+def draw_info_panel(display, fps, chest_depth, breath, stream_mode):
+    """Semi-transparent HUD."""
+    pw, ph = 200, 130
+    overlay = display.copy()
+    cv2.rectangle(overlay, (10, 10), (10 + pw, 10 + ph), (0, 0, 0), -1)
+    cv2.addWeighted(overlay, 0.7, display, 0.3, 0, display)
+    cv2.rectangle(display, (10, 10), (10 + pw, 10 + ph), (60, 60, 60), 1)
+
+    phase_colors = {"inhale": (200, 255, 100), "exhale": (180, 140, 255),
+                    "hold": (200, 200, 180), "calibrating": (120, 120, 120)}
+
+    lines = [
+        (f"FPS: {fps:.0f}", (0, 255, 0)),
+        (f"Depth: {chest_depth:.0f}mm", (0, 255, 255)),
+        (f"Phase: {breath.phase}", phase_colors.get(breath.phase, (200, 200, 200))),
+    ]
+    if breath.bpm > 0:
+        lines.append((f"BPM: {breath.bpm:.1f}", (255, 200, 100)))
+    else:
+        lines.append((f"Breaths: {breath.breath_count}", (150, 150, 150)))
+
+    for i, (text, color) in enumerate(lines):
+        cv2.putText(display, text, (20, 32 + i * 25),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.5, color, 1, cv2.LINE_AA)
+
+    mode = "IR" if stream_mode == "infrared" else "RGB"
+    cv2.putText(display, f"{mode} | q:quit r:reset s:save", (20, 130),
+                cv2.FONT_HERSHEY_SIMPLEX, 0.3, (100, 100, 100), 1, cv2.LINE_AA)
 
 
 def main():
     print("\n" + "=" * 50)
-    print("  Simple Skeleton + Breathing Test")
+    print("  RealSense Skeleton + Breathing Detection")
     print("=" * 50)
 
-    # Initialize RealSense with just depth + color
-    pipeline = rs.pipeline()
-    config = rs.config()
+    # --- Start RealSense ---
+    configs = [
+        ("Depth + IR (recommended)", [
+            (rs.stream.depth, 640, 480, rs.format.z16, 30),
+            (rs.stream.infrared, 640, 480, rs.format.y8, 30),
+        ], "infrared"),
+        ("Depth + Color 424x240", [
+            (rs.stream.depth, 424, 240, rs.format.z16, 30),
+            (rs.stream.color, 424, 240, rs.format.bgr8, 30),
+        ], "color"),
+        ("Depth + Color 640x480", [
+            (rs.stream.depth, 640, 480, rs.format.z16, 30),
+            (rs.stream.color, 640, 480, rs.format.bgr8, 30),
+        ], "color"),
+    ]
 
-    print("\nStarting RealSense...")
-    config.enable_stream(rs.stream.depth, 640, 480, rs.format.z16, 30)
-    config.enable_stream(rs.stream.color, 640, 480, rs.format.bgr8, 30)
+    pipeline = None
+    profile = None
+    stream_mode = None
 
-    try:
-        profile = pipeline.start(config)
-        print("RealSense started!")
-    except RuntimeError as e:
-        print(f"Error: {e}")
-        print("\nTry: unplug camera, wait 5 sec, replug, run with sudo")
+    for name, streams, mode in configs:
+        print(f"\nTrying: {name}...")
+        try:
+            pipeline = rs.pipeline()
+            config = rs.config()
+            for stream_args in streams:
+                config.enable_stream(*stream_args)
+            profile = pipeline.start(config)
+            stream_mode = mode
+            print(f"  SUCCESS! Using: {name}")
+            break
+        except RuntimeError as e:
+            print(f"  Failed: {str(e)[:60]}")
+            try:
+                pipeline.stop()
+            except:
+                pass
+            pipeline = None
+            profile = None
+
+    if profile is None:
+        print("\nAll configurations failed!")
+        print("Try: unplug camera, restart Mac, replug, run with sudo")
         return
 
-    # Get depth scale
     depth_sensor = profile.get_device().first_depth_sensor()
-    depth_scale = depth_sensor.get_depth_scale()
 
-    # Align depth to color
-    align = rs.align(rs.stream.color)
+    if stream_mode == "infrared":
+        try:
+            depth_sensor.set_option(rs.option.emitter_enabled, 0)
+            print("  IR projector disabled (clean image for pose detection)")
+        except Exception as e:
+            print(f"  Warning: Could not disable IR emitter: {e}")
 
-    # MediaPipe Pose
+    align = rs.align(rs.stream.infrared if stream_mode == "infrared" else rs.stream.color)
+
+    # --- MediaPipe ---
     mp_pose = mp.solutions.pose
     mp_draw = mp.solutions.drawing_utils
     pose = mp_pose.Pose(model_complexity=1, min_detection_confidence=0.5)
 
-    # Breathing detector
+    # --- Breathing ---
     breath = BreathingDetector()
-    depth_history = deque(maxlen=150)
 
     cv2.namedWindow("Skeleton", cv2.WINDOW_NORMAL)
     cv2.resizeWindow("Skeleton", 960, 720)
 
-    print("\nRunning! Press 'q' to quit, 'r' to reset\n")
+    print("\nRunning! Press 'q' to quit, 'r' to reset, 's' to save screenshot\n")
 
     frame_count = 0
     start_time = time.time()
-
     consecutive_failures = 0
-    max_failures = 10
+    actual_fps = 20.0
+    last_fps_time = time.time()
+    fps_frames = 0
 
     try:
         while True:
             try:
                 frames = pipeline.wait_for_frames(timeout_ms=2000)
-                consecutive_failures = 0  # Reset on success
-            except RuntimeError as e:
+                consecutive_failures = 0
+            except RuntimeError:
                 consecutive_failures += 1
-                print(f"Frame timeout ({consecutive_failures}/{max_failures})...")
-                if consecutive_failures >= max_failures:
-                    print("\nToo many frame failures. Camera may need reset.")
-                    print("Unplug camera, wait 10 sec, replug, run again.")
+                if consecutive_failures >= 10:
+                    print("\nToo many frame failures. Camera needs reset.")
                     break
                 continue
 
             aligned = align.process(frames)
-
             depth_frame = aligned.get_depth_frame()
-            color_frame = aligned.get_color_frame()
-
-            if not depth_frame or not color_frame:
+            if not depth_frame:
                 continue
 
+            if stream_mode == "infrared":
+                ir_frame = aligned.get_infrared_frame()
+                if not ir_frame:
+                    continue
+                ir_image = np.asanyarray(ir_frame.get_data())
+                color_image = cv2.cvtColor(ir_image, cv2.COLOR_GRAY2BGR)
+            else:
+                color_frame = aligned.get_color_frame()
+                if not color_frame:
+                    continue
+                color_image = np.asanyarray(color_frame.get_data())
+
             frame_count += 1
+            fps_frames += 1
+            now = time.time()
+            if now - last_fps_time >= 1.0:
+                actual_fps = fps_frames / (now - last_fps_time)
+                fps_frames = 0
+                last_fps_time = now
 
             depth_image = np.asanyarray(depth_frame.get_data())
-            color_image = np.asanyarray(color_frame.get_data())
             h, w = color_image.shape[:2]
 
-            # Run pose detection
             rgb = cv2.cvtColor(color_image, cv2.COLOR_BGR2RGB)
             results = pose.process(rgb)
 
@@ -164,26 +426,23 @@ def main():
             display = color_image.copy()
 
             if results.pose_landmarks:
-                # Draw skeleton
                 mp_draw.draw_landmarks(
                     display, results.pose_landmarks, mp_pose.POSE_CONNECTIONS,
                     mp_draw.DrawingSpec(color=(0, 255, 0), thickness=2, circle_radius=3),
                     mp_draw.DrawingSpec(color=(0, 200, 0), thickness=2)
                 )
 
-                # Get shoulder positions for chest
                 lm = results.pose_landmarks.landmark
-                left_sh = lm[11]
-                right_sh = lm[12]
+                left_sh, right_sh = lm[11], lm[12]
 
                 if left_sh.visibility > 0.5 and right_sh.visibility > 0.5:
                     cx = int((left_sh.x + right_sh.x) / 2 * w)
                     cy = int((left_sh.y + right_sh.y) / 2 * h)
 
-                    # Sample depth at chest
+                    # Sample chest depth (31x31 grid, step 2)
                     depths = []
-                    for dy in range(-5, 6):
-                        for dx in range(-5, 6):
+                    for dy in range(-15, 16, 2):
+                        for dx in range(-15, 16, 2):
                             px = max(0, min(w-1, cx + dx))
                             py = max(0, min(h-1, cy + dy))
                             d = depth_frame.get_distance(px, py)
@@ -191,71 +450,25 @@ def main():
                                 depths.append(d)
 
                     if depths:
-                        chest_depth = np.median(depths) * 1000  # to mm
-                        depth_history.append(chest_depth)
-                        breath.update(chest_depth)
+                        chest_depth = np.median(depths) * 1000
+                        breath.update(chest_depth, now)
 
-                        # Draw chest marker
-                        cv2.circle(display, (cx, cy), 10, (0, 255, 255), 2)
+                        # Chest crosshair
+                        cv2.circle(display, (cx, cy), 12, (0, 255, 255), 2, cv2.LINE_AA)
+                        cv2.line(display, (cx-18, cy), (cx+18, cy), (0, 255, 255), 1, cv2.LINE_AA)
+                        cv2.line(display, (cx, cy-18), (cx, cy+18), (0, 255, 255), 1, cv2.LINE_AA)
 
-            # Draw breathing circle
-            circle_x, circle_y = w - 100, h // 2
-            base_radius = 50
-            radius = int(base_radius + breath.signal * 20)
-
-            # Color by phase
-            if breath.phase == "inhale":
-                color = (0, 255, 200)
-            elif breath.phase == "exhale":
-                color = (100, 150, 255)
-            elif breath.phase == "calibrating":
-                color = (128, 128, 128)
-            else:
-                color = (200, 200, 200)
-
-            cv2.circle(display, (circle_x, circle_y), radius, color, 3)
-            cv2.circle(display, (circle_x, circle_y), max(5, radius - 15), color, -1)
-
-            # Phase text
-            cv2.putText(display, breath.phase.upper(), (circle_x - 35, circle_y + radius + 25),
-                       cv2.FONT_HERSHEY_SIMPLEX, 0.6, color, 2)
-            cv2.putText(display, f"Breaths: {breath.breath_count}", (circle_x - 35, circle_y - radius - 10),
-                       cv2.FONT_HERSHEY_SIMPLEX, 0.4, (150, 150, 150), 1)
-
-            # Draw waveform
-            if len(depth_history) > 2:
-                wave_h, wave_y, wave_w = 70, h - 90, w - 40
-                cv2.rectangle(display, (20, wave_y - 15), (20 + wave_w, wave_y + wave_h), (20, 20, 20), -1)
-
-                depths = list(depth_history)
-                min_d, max_d = min(depths), max(depths)
-                range_d = max_d - min_d if max_d > min_d else 1
-
-                points = []
-                for i, d in enumerate(depths):
-                    x = 20 + int((i / len(depths)) * wave_w)
-                    norm = (d - min_d) / range_d
-                    y = wave_y + wave_h - int(norm * wave_h * 0.9) - 5
-                    points.append((x, y))
-
-                for i in range(1, len(points)):
-                    cv2.line(display, points[i-1], points[i], (0, 200, 255), 2)
-
-                cv2.putText(display, f"Chest Depth | Range: {range_d:.1f}mm", (25, wave_y - 3),
-                           cv2.FONT_HERSHEY_SIMPLEX, 0.4, (0, 200, 255), 1)
-
-            # Info panel
-            fps = frame_count / (time.time() - start_time)
-            cv2.rectangle(display, (10, 10), (220, 120), (0, 0, 0), -1)
-            cv2.putText(display, f"FPS: {fps:.1f}", (20, 35), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 1)
-            cv2.putText(display, f"Depth: {chest_depth:.0f}mm", (20, 60), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 255), 1)
-            cv2.putText(display, f"Phase: {breath.phase}", (20, 85), cv2.FONT_HERSHEY_SIMPLEX, 0.5, color, 1)
-            cv2.putText(display, "q:quit r:reset", (20, 110), cv2.FONT_HERSHEY_SIMPLEX, 0.4, (150, 150, 150), 1)
+            # --- UI ---
+            draw_breathing_circle(display, breath, w - 110, h // 2 - 30)
+            draw_waveform(display, breath, 20, h - 105, w - 40, 90)
+            draw_info_panel(display, actual_fps, chest_depth, breath, stream_mode)
 
             # Depth preview
-            depth_color = cv2.applyColorMap(cv2.convertScaleAbs(depth_image, alpha=0.03), cv2.COLORMAP_JET)
-            depth_small = cv2.resize(depth_color, (160, 120))
-            display[10:130, w-170:w-10] = depth_small
+            depth_color = cv2.applyColorMap(
+                cv2.convertScaleAbs(depth_image, alpha=0.03), cv2.COLORMAP_JET)
+            depth_small = cv2.resize(depth_color, (140, 105))
+            display[10:115, w-150:w-10] = depth_small
+            cv2.rectangle(display, (w-150, 10), (w-10, 115), (60, 60, 60), 1)
 
             cv2.imshow("Skeleton", display)
 
@@ -263,9 +476,15 @@ def main():
             if key == ord('q') or key == 27:
                 break
             elif key == ord('r'):
-                breath = BreathingDetector()
-                depth_history.clear()
+                breath.reset()
+                frame_count = 0
+                start_time = time.time()
                 print("Reset!")
+            elif key == ord('s'):
+                os.makedirs("outputs", exist_ok=True)
+                fname = f"outputs/skeleton_{int(time.time())}.png"
+                cv2.imwrite(fname, display)
+                print(f"Saved: {fname}")
 
     except KeyboardInterrupt:
         pass
@@ -274,7 +493,10 @@ def main():
         pipeline.stop()
         cv2.destroyAllWindows()
 
-    print(f"\nProcessed {frame_count} frames")
+    elapsed = time.time() - start_time
+    print(f"\nSession: {frame_count} frames in {elapsed:.0f}s ({frame_count/max(elapsed,1):.1f} FPS)")
+    if breath.bpm > 0:
+        print(f"Breathing: {breath.bpm:.1f} BPM, {breath.breath_count} breaths detected")
 
 
 if __name__ == "__main__":
