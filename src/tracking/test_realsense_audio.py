@@ -698,7 +698,7 @@ def main():
 
     # --- Smoothed group jitter for audio ---
     smoothed_group_jitter = 0.0
-    JITTER_EMA_ALPHA = 0.15  # Smooth transitions for audio
+    JITTER_EMA_ALPHA = 0.45  # Responsive to rapid movement (stillness detector already smooths)
 
     cv2.namedWindow("Audio+Tracking", cv2.WINDOW_NORMAL)
     cv2.resizeWindow("Audio+Tracking", 960, 720)
