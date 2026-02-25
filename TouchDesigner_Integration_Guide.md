@@ -2,14 +2,17 @@
 
 ## What's Happening
 
-We have a RealSense D435 depth camera tracking people's **breathing** and **body stillness** in real-time. This data is being sent over WebSocket to a relay server on our VPS, so you can receive it from anywhere.
+We have a RealSense D435 depth camera mounted on the ceiling, tracking people in real-time from a top-down view. The tracking system detects:
 
-The tracking system detects:
-- **Breathing** — chest rise and fall via depth sensing (inhale, exhale, hold phases)
-- **Stillness / Jitter** — how still or restless the person's body is
-- **Multiple people** — each person tracked independently, closest person = "primary"
+- **Multiple people** — each person tracked independently with stable IDs across frames
+- **Stillness / Jitter** — how still or restless each person's body is (per-person + group average)
+- **Micro-motion** — pixel-level depth differencing that catches subtle movement skeleton tracking misses (finger twitches, weight shifts, clothing movement)
+- **3D Clustering** — groups nearby people by real-world distance using depth deprojection
+- **Stillness duration** — per-person timer of how long they've been continuously still (resets on movement)
 
 All of this streams as JSON over WebSocket at ~12-30 updates per second.
+
+> **Note:** Breathing detection was removed — inhale/exhale tracking was unreliable from the ceiling-mounted depth camera. If needed in the future, the depth data per person is still available for experimentation.
 
 
 ## How to Receive the Data
@@ -20,7 +23,7 @@ Connect to this WebSocket address:
 ws://82.112.226.90:3000
 ```
 
-That's it. No login, no VPN, no setup. As long as the tracking system is running on our end, data flows through.
+No login, no VPN, no setup. As long as the tracking system is running on our end, data flows through.
 
 
 ## TouchDesigner Setup
@@ -35,7 +38,7 @@ You should immediately start seeing JSON messages arrive.
 
 ### 2. Parse the Data
 
-Attach a callback to the Web Client DAT to extract the values you need:
+Attach a callback to the Web Client DAT:
 
 ```python
 import json
@@ -43,103 +46,125 @@ import json
 def onReceiveText(dat, rowIndex, message, bytes, peer):
     data = json.loads(message)
 
-    # --- Primary person (closest to camera) ---
-    breathing_signal = data['primary']['breathing_signal']   # -1.0 to +1.0
-    breathing_phase  = data['primary']['breathing_phase']    # "inhale" / "exhale" / "hold"
-    bpm              = data['primary']['bpm']                # breaths per minute (~8-20)
-    chest_depth      = data['primary']['chest_depth_mm']     # raw depth in millimeters
+    # --- Group level ---
+    person_count  = data['person_count']      # int: how many people in view
+    group_jitter  = data['group_jitter']      # 0.0 - 1.0
+    micro_motion  = data['micro_motion']      # 0.0 - 1.0
+    cluster_count = data['cluster_count']     # int: number of proximity groups
 
-    # --- Group (all people combined) ---
-    jitter        = data['group']['jitter']          # 0.0 (still) to 1.0 (restless)
-    person_count  = data['group']['person_count']    # how many people detected
-    audio_layers  = data['group']['audio_layers']    # how many audio layers active
+    # --- Per person ---
+    for p in data['persons']:
+        pid        = p['id']           # stable int ID
+        jitter     = p['jitter']       # 0.0 - 1.0
+        stillness  = p['stillness']    # seconds (0.0+, resets on movement)
+        depth      = p['depth_mm']     # millimeters from camera
+        cluster    = p['cluster_id']   # which group they belong to
 
-    # --- Route to your CHOPs / TOPs ---
-    # Example: push values into Constant CHOPs
-    op('breathing').par.value0 = breathing_signal
-    op('jitter').par.value0 = jitter
+    # --- Route to CHOPs ---
+    op('group_jitter').par.value0 = group_jitter
+    op('micro_motion').par.value0 = micro_motion
+    op('person_count').par.value0 = person_count
 ```
 
 ### 3. Quick Test (Browser)
 
-If you want to verify data is flowing before opening TouchDesigner, open any browser console (`Cmd+Option+J` on Mac, `F12` on Windows) and paste:
+Verify data is flowing before opening TouchDesigner — open browser console (`Cmd+Option+J` on Mac, `F12` on Windows):
 
 ```javascript
 ws = new WebSocket("ws://82.112.226.90:3000");
 ws.onmessage = e => console.log(JSON.parse(e.data));
 ```
 
-You should see objects streaming in the console.
-
 
 ## Data Reference
 
-### What each message looks like
+### Message format
 
 ```json
 {
-  "timestamp": 1771360404.908,
-  "fps": 12.1,
-  "group": {
-    "person_count": 2,
-    "jitter": 0.34,
-    "audio_layers": 3
-  },
-  "primary": {
-    "id": 1,
-    "breathing_phase": "inhale",
-    "breathing_signal": 0.62,
-    "bpm": 14.2,
-    "chest_depth_mm": 850.5
-  },
+  "person_count": 3,
+  "group_jitter": 0.342,
+  "micro_motion": 0.15,
+  "cluster_count": 2,
   "persons": [
-    { "id": 1, "jitter": 0.22, "depth_mm": 850.5, "is_primary": true },
-    { "id": 3, "jitter": 0.45, "depth_mm": 1120.0, "is_primary": false }
+    { "id": 1, "jitter": 0.12, "stillness": 14.5, "depth_mm": 1250, "cluster_id": 1 },
+    { "id": 2, "jitter": 0.45, "stillness": 0.0,  "depth_mm": 1500, "cluster_id": 1 },
+    { "id": 3, "jitter": 0.08, "stillness": 22.3, "depth_mm": 1800, "cluster_id": 2 }
   ]
 }
 ```
 
-### Key fields for the fluid simulation
+### Field reference with ranges
 
-| Field | Range | What it means | Use for |
-|-------|-------|---------------|---------|
-| `primary.breathing_signal` | -1.0 to +1.0 | Normalized breath position | Fluid pulse / brightness |
-| `primary.breathing_phase` | inhale / exhale / hold | Current breath phase | Phase-based transitions |
-| `primary.bpm` | ~8 - 20 | Breaths per minute | Rhythm / viscosity |
-| `group.jitter` | 0.0 - 1.0 | How restless the group is | Fluid turbulence |
-| `group.person_count` | 0+ | Number of people in frame | Scale effects |
-| `primary.chest_depth_mm` | ~500 - 1500 | Raw chest distance from camera | Direct depth mapping |
+#### Group level (top-level fields)
 
-### Mapping to fluid visuals (from the project spec)
+| Field | Type | Range | What it means |
+|-------|------|-------|---------------|
+| `person_count` | int | 0+ | Number of people currently in camera view |
+| `group_jitter` | float | **0.0 - 1.0** | Average motion across all people. 0 = everyone still, 1 = everyone chaotic |
+| `micro_motion` | float | **0.0 - 1.0** | Pixel-level scene motion from depth frame differencing. Catches subtle stuff like finger twitches, weight shifts — things skeleton tracking misses |
+| `cluster_count` | int | 0+ | Number of proximity groups (people within ~1m of each other get grouped) |
 
-| Body State | Jitter Range | Visual |
-|------------|-------------|--------|
-| Still / Meditating | 0.0 - 0.2 | Smooth, honey-like, slow waves |
-| Gentle movement | 0.2 - 0.4 | Soft ripples |
-| Active | 0.4 - 0.6 | Medium turbulence |
-| Restless | 0.6 - 0.8 | Choppy, noisy |
-| Chaotic | 0.8 - 1.0 | Full turbulence |
+#### Per-person (inside `persons` array)
 
-| Calm Duration | Color |
-|---------------|-------|
-| Starting / Moving | Dark Purple, Deep Indigo |
-| Calming down | Cyan, Teal |
-| Deep calm (30s+) | Gold, Amber ("Golden State") |
+| Field | Type | Range | What it means |
+|-------|------|-------|---------------|
+| `id` | int | 1+ | Stable person ID — persists across frames as long as the person is visible |
+| `jitter` | float | **0.0 - 1.0** | This person's motion level. 0 = perfectly still, 1 = highly restless |
+| `stillness` | float | **0.0+** (seconds) | How long this person has been continuously still. Resets to 0 the moment they move. Reaches 30+ for deep meditation |
+| `depth_mm` | float | **~500 - 2500** | Distance from camera in millimeters. Closer = smaller number. Useful for proximity-based effects |
+| `cluster_id` | int or null | 1+ | Which proximity group this person belongs to. People near each other share the same cluster_id. `null` if depth data unavailable |
+
+### Mapping guide for visuals
+
+#### Jitter → Fluid turbulence
+
+| Jitter Range | Body State | Suggested Visual |
+|-------------|------------|-----------------|
+| 0.0 - 0.15 | Still / meditating | Smooth, honey-like, barely moving |
+| 0.15 - 0.35 | Gentle movement | Soft ripples, slow waves |
+| 0.35 - 0.6 | Active / fidgeting | Medium turbulence |
+| 0.6 - 0.8 | Restless | Choppy, noisy |
+| 0.8 - 1.0 | Chaotic | Full turbulence, high energy |
+
+#### Stillness duration → Color / reward states
+
+| Stillness (seconds) | State | Suggested Color |
+|---------------------|-------|----------------|
+| 0 - 5 | Settling in | Dark Purple, Deep Indigo |
+| 5 - 15 | Focused | Cyan, Teal |
+| 15 - 30 | Deep focus | Blue, Soft White |
+| 30+ | Transcendent ("Golden State") | Gold, Amber, Warm White |
+
+#### Micro-motion → Fine detail
+
+| Micro-motion Range | What's happening | Suggested Use |
+|-------------------|-----------------|---------------|
+| 0.0 - 0.05 | Scene is dead still | Minimal particle emission |
+| 0.05 - 0.2 | Subtle shifts | Light shimmer / sparkle |
+| 0.2 - 0.5 | Noticeable movement | Particle bursts, ripple sources |
+| 0.5 - 1.0 | Lots of motion | Heavy distortion, noise textures |
+
+#### Cluster count → Social/spatial effects
+
+| Cluster Count | Meaning | Suggested Use |
+|--------------|---------|---------------|
+| 0 | No one in view | Idle / screensaver state |
+| 1 | Everyone is close together | Unified visual field |
+| 2+ | People spread apart in groups | Split visual zones, different palettes per cluster |
 
 
 ## Files on Our End (for reference)
 
-These are on the tracking machine, you don't need them — just the WebSocket:
+These are on the tracking machine — you only need the WebSocket:
 
 | File | What it does |
 |------|-------------|
+| `src/tracking/test_realsense_audio.py` | Main app — camera + YOLO + stillness + clustering + WebSocket |
 | `src/network/data_server.py` | HTTP dashboard + WebSocket sender to VPS |
-| `src/tracking/test_realsense_audio.py` | Main tracking app (camera + YOLO + breathing + stillness) |
-| `src/tracking/keypoint_adapter.py` | Converts pose keypoints between formats |
-| `src/stillness/stillness_detector.py` | Per-person body stillness scoring |
-| `src/audio/sound_engine.py` | Audio layers driven by jitter (runs on tracking machine) |
-
-The VPS relay server at `82.112.226.90:3000` just passes messages through — anything our tracking system sends, you receive.
+| `src/stillness/stillness_detector.py` | Per-person body stillness/jitter scoring |
+| `src/tracking/cluster_detector.py` | 3D proximity clustering via depth deprojection |
+| `src/audio/sound_engine.py` | Audio layers driven by group jitter (runs on tracking machine only) |
 
 
 ## Troubleshooting
@@ -155,3 +180,7 @@ The VPS relay server at `82.112.226.90:3000` just passes messages through — an
 **Connection drops?**
 - The relay server auto-accepts reconnections. Just reconnect your Web Client DAT.
 - Our tracking system also auto-reconnects if the relay restarts.
+
+**person_count is 0?**
+- No one is in the camera's field of view, or the person is too far / too close.
+- Camera range is roughly 0.5m - 3m for reliable detection.
