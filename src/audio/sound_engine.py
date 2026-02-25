@@ -34,8 +34,8 @@ except ImportError:
     SF_AVAILABLE = False
 
 
-# Default sound files directory (from reference repo)
-DEFAULT_SOUND_DIR = "/Users/yaakulyasabbani/Documents/GitHub/Depthcamera_testing/soundfiles_capstone"
+# Default sound files directory (relative to project root)
+DEFAULT_SOUND_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))), "sounds")
 
 # Layer configuration: (filename, chaos_threshold)
 DEFAULT_LAYERS = [
