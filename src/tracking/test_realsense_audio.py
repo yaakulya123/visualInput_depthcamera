@@ -105,7 +105,7 @@ class MultiPersonRealSense:
         print(f"[MultiPersonRealSense] Model loaded. Device: {device}")
 
         self.tracker = sv.ByteTrack(
-            track_activation_threshold=0.4,
+            track_activation_threshold=0.25,
             lost_track_buffer=30,
             minimum_matching_threshold=0.8,
             frame_rate=30,
@@ -130,7 +130,7 @@ class MultiPersonRealSense:
         now = time.time()
 
         results = self.model(
-            frame, device=self.device, conf=0.5, verbose=False,
+            frame, device=self.device, conf=0.3, verbose=False,
         )[0]
 
         if results.boxes is None or len(results.boxes) == 0:
@@ -197,7 +197,17 @@ class MultiPersonRealSense:
                             person.depth_valid = True
 
                 # Run stillness detection via adapted landmarks
-                landmarks = coco_to_mediapipe(kpts, kpt_confs, w, h)
+                # Normalize by bounding box size (not frame size) so distance
+                # from camera doesn't affect sensitivity — a person far away
+                # has a smaller bbox but their movements relative to their
+                # body size remain proportionally the same.
+                bbox_w = max(bbox[2] - bbox[0], 1)
+                bbox_h = max(bbox[3] - bbox[1], 1)
+                # Shift keypoints to bbox-relative coords before normalizing
+                kpts_relative = kpts.copy()
+                kpts_relative[:, 0] -= bbox[0]
+                kpts_relative[:, 1] -= bbox[1]
+                landmarks = coco_to_mediapipe(kpts_relative, kpt_confs, bbox_w, bbox_h)
                 if landmarks is not None:
                     state = person.stillness_detector.update(frame, landmarks=landmarks)
                     person.jitter_score = state.jitter_score
@@ -236,11 +246,16 @@ class MultiPersonRealSense:
         return detections
 
     def get_group_jitter(self) -> float:
-        """Average jitter across all tracked people."""
+        """Max jitter across all tracked people.
+
+        Uses max instead of mean so that ANY person moving drives
+        the audio layers up — regardless of how many others are still.
+        Layers only fade down when ALL skeletons are static.
+        """
         if not self.persons:
             return 0.0
         scores = [p.jitter_score for p in self.persons.values()]
-        return float(np.mean(scores))
+        return float(np.max(scores))
 
     def get_group_stillness_stats(self) -> dict:
         """Compute group-level stillness statistics."""
@@ -366,7 +381,7 @@ class MultiPersonRealSense:
         self.primary_id = None
         self.last_cluster_result = ClusterResult()
         self.tracker = sv.ByteTrack(
-            track_activation_threshold=0.4,
+            track_activation_threshold=0.25,
             lost_track_buffer=30,
             minimum_matching_threshold=0.8,
             frame_rate=30,
@@ -1010,6 +1025,26 @@ def main():
     profile = None
     stream_mode = None
 
+    # Hardware reset: prevent segfault on macOS when camera was used recently
+    print("\nResetting RealSense hardware...")
+    try:
+        ctx = rs.context()
+        devices = ctx.query_devices()
+        if len(devices) > 0:
+            for dev in devices:
+                dev.hardware_reset()
+                print(f"  Reset: {dev.get_info(rs.camera_info.name)}")
+            import time as _time
+            _time.sleep(3)  # Wait for USB re-enumeration after reset
+            print("  Reset complete, waiting for USB...")
+        else:
+            print("  No RealSense devices found!")
+            return
+    except Exception as e:
+        print(f"  Reset warning: {e}")
+        import time as _time
+        _time.sleep(1)
+
     for name, streams, mode in configs:
         print(f"\nTrying: {name}...")
         try:
@@ -1085,7 +1120,10 @@ def main():
 
     # --- Smoothed group jitter for audio ---
     smoothed_group_jitter = 0.0
-    JITTER_EMA_ALPHA = 0.45  # Responsive to rapid movement (stillness detector already smooths)
+    # Higher alpha = more responsive to rapid movement
+    # StillnessDetector already smooths internally (alpha=0.15), so we use a high
+    # alpha here to avoid double-dampening. 0.7 means 70% new value, 30% old.
+    JITTER_EMA_ALPHA = 0.7
 
     cv2.namedWindow("Audio+Tracking", cv2.WINDOW_NORMAL)
     cv2.resizeWindow("Audio+Tracking", 960, 720)

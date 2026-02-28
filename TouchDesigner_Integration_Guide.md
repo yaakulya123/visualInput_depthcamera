@@ -101,7 +101,7 @@ ws.onmessage = e => console.log(JSON.parse(e.data));
 | Field | Type | Range | What it means |
 |-------|------|-------|---------------|
 | `person_count` | int | 0+ | Number of people currently in camera view |
-| `group_jitter` | float | **0.0 - 1.0** | Average motion across all people. 0 = everyone still, 1 = everyone chaotic |
+| `group_jitter` | float | **0.0 - 1.0** | Max motion across all people. If ANY person is moving, this reflects their motion level. 0 = everyone still, 1 = someone chaotic |
 | `micro_motion` | float | **0.0 - 1.0** | Pixel-level scene motion from depth frame differencing. Catches subtle stuff like finger twitches, weight shifts — things skeleton tracking misses |
 | `cluster_count` | int | 0+ | Number of proximity groups (people within ~1m of each other get grouped) |
 

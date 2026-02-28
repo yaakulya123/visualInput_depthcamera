@@ -170,8 +170,9 @@ class StillnessDetector:
             'flags': 0
         }
 
-        # Calibration
-        self.calibration_frames = 30
+        # Calibration (10 frames = ~0.3s at 30fps — fast enough that
+        # new people entering the scene start registering quickly)
+        self.calibration_frames = 10
         self.calibration_data: List[float] = []
         self.is_calibrated = False
         self.baseline_motion = 0.0
@@ -385,21 +386,29 @@ class StillnessDetector:
             self.calibration_data.append(raw_motion)
 
         if len(self.calibration_data) >= self.calibration_frames:
-            # Use 75th percentile as baseline (allows for some movement during calibration)
-            self.baseline_motion = float(np.percentile(self.calibration_data, 75))
+            # Use 25th percentile as baseline (only subtract sensor noise floor,
+            # not actual motion — so new people walking in still register)
+            self.baseline_motion = float(np.percentile(self.calibration_data, 25))
             self.is_calibrated = True
             print(f"[StillnessDetector] Calibration complete. Baseline: {self.baseline_motion:.4f}")
 
         progress = len(self.calibration_data) / self.calibration_frames
 
+        # During calibration, still compute a jitter score from raw motion
+        # so new people entering the scene register immediately
+        if raw_motion > self.motion_threshold_low:
+            cal_jitter = min(1.0, raw_motion / self.motion_threshold_high)
+        else:
+            cal_jitter = 0.0
+
         return StillnessState(
-            jitter_score=0.0,
+            jitter_score=cal_jitter,
             raw_motion=raw_motion,
-            smoothed_motion=0.0,
+            smoothed_motion=raw_motion,
             stillness_duration=0.0,
             motion_type="calibrating",
             regional_motion=regional_motion,
-            confidence=progress,  # Use progress as confidence during calibration
+            confidence=max(0.5, progress),
             timestamp=current_time
         )
 
@@ -513,9 +522,10 @@ def create_stillness_detector(sensitivity: str = "normal") -> StillnessDetector:
             "temporal_smoothing": 0.1,
         },
         "normal": {
-            "motion_threshold_low": 0.02,
-            "motion_threshold_high": 0.15,
-            "temporal_smoothing": 0.15,
+            "motion_threshold_low": 0.015,
+            "motion_threshold_high": 0.10,
+            "temporal_smoothing": 0.4,
+            "filter_preset": "balanced",
         },
         "high": {
             "motion_threshold_low": 0.01,
