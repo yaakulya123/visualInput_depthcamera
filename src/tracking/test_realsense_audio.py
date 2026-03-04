@@ -1206,17 +1206,13 @@ def main():
             group_stats = tracker.get_group_stillness_stats()
 
             # --- Push live data to server (clean, focused payload) ---
-            # 4 group metrics + per-person details
-            #   person_count  — how many people in view
-            #   group_jitter  — avg motion across all people (0=still, 1=chaotic)
-            #   micro_motion  — pixel-level scene motion from depth differencing
-            #   cluster_count — number of proximity groups
-            #   per-person: jitter, stillness (seconds still), depth, cluster
+            # Group: person_count, group_jitter, active_layers
+            # Per-person: id, jitter, stillness, depth_mm
+            active_layers = audio_engine.get_active_count() if audio_on else 0
             data_server.update({
                 "person_count": len(detections),
                 "group_jitter": round(smoothed_group_jitter, 3),
-                "micro_motion": round(heatmap_score, 3),
-                "cluster_count": cluster_result.cluster_count,
+                "active_layers": active_layers,
                 "persons": [
                     {
                         "id": tid,
@@ -1225,7 +1221,6 @@ def main():
                             person.stillness_state.stillness_duration, 1
                         ) if person.stillness_state else 0.0,
                         "depth_mm": round(person.shoulder_depth_mm, 0),
-                        "cluster_id": cluster_result.person_to_cluster.get(tid),
                     }
                     for tid, bbox, kpts, kpt_confs, person in detections
                 ],
