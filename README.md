@@ -202,6 +202,10 @@ python src/stillness/test_stillness_detection.py
 - Breathing resolution: distinguishes shallow from deep breaths (5--10mm chest displacement)
 - Frame rate: 30 FPS minimum across the full pipeline
 
+## TouchDesigner Integration Guide
+
+This program is intended to be used with TouchDesigner for our visualization. For installation and connection guide, please refer to this [dedicated guide.](./TouchDesigner_Integration_Guide.md)
+
 ## References
 
 - Casiez, G., Roussel, N., and Vogel, D. (2012). "1 Euro Filter: A Simple Speed-based Low-pass Filter for Noisy Input in Interactive Systems." *Proceedings of CHI 2012*. [https://gery.casiez.net/1euro/](https://gery.casiez.net/1euro/)
