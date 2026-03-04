@@ -74,7 +74,6 @@ visualInput_depthCamera/
 │   │   └── list_cameras.py             ✅ Working
 │   └── visualization/
 │       └── [NEXT: fluid simulation]
-├── CLAUDE.md      # Full technical context
 ├── README.md      # Project overview
 └── STATUS.md      # This file
 ```

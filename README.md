@@ -128,6 +128,10 @@ visualInput_depthCamera/
 
 ## Getting Started
 
+#### ONLY COMMAND YOU NEED TO RUN THIS APPLICATION ON MAC MINI WITH NORMAL CAM
+./venv/bin/python src/tracking/test_webcam_audio.py
+
+
 ```bash
 # Clone the repository
 git clone https://github.com/yaakulya123/visualInput_depthcamera.git

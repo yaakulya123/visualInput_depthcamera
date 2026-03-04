@@ -34,9 +34,6 @@ outputs/
 diagnostic_results.json
 .project_summary.txt
 
-# Development notes
-CLAUDE.md
-
 # Jupyter
 .ipynb_checkpoints/
 *.ipynb
