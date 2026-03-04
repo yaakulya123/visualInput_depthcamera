@@ -81,19 +81,45 @@ ws.onmessage = e => console.log(JSON.parse(e.data));
 
 ```json
 {
-  "person_count": 3,
-  "group_jitter": 0.452,
-  "micro_motion": 0.15,
-  "cluster_count": 2,
+  "person_count": 1,
+  "group_jitter": 0.052,
+  "micro_motion": 1.0,
+  "cluster_count": 1,
   "persons": [
-    { "id": 1, "jitter": 0.12, "stillness": 14.5, "depth_mm": 1250, "cluster_id": 1 },
-    { "id": 2, "jitter": 0.452, "stillness": 0.0,  "depth_mm": 1500, "cluster_id": 1 },
-    { "id": 3, "jitter": 0.08, "stillness": 22.3, "depth_mm": 1800, "cluster_id": 2 }
+    { "id": 3, "jitter": 0.074, "stillness": 9.7, "depth_mm": 545.0, "cluster_id": 3 }
   ]
 }
 ```
 
 That's it — **4 group-level values + 5 values per person**. Nothing else is sent.
+
+### Real-world example (actual TouchDesigner capture)
+
+Here's what the data looks like in a real session with 1 person standing still, then slightly moving:
+
+```
+Line  person_count  group_jitter  micro_motion  id  jitter  stillness  depth_mm  cluster_id
+───── ──────────── ──────────── ──────────── ──── ─────── ────────── ──────── ──────────
+ 1        1            0.0          1.0        3    0.0      9.3      522.0       3
+ 2        1            0.0          1.0        3    0.0      9.4      536.0       3
+ 3        1            0.0          1.0        3    0.0      9.5      528.0       3
+ 4        1            0.0          1.0        3    0.0      9.6      526.0       3
+ 5        1            0.052        1.0        3    0.074    9.7      545.0       3    ← slight movement
+ 6        1            0.058        1.0        3    0.061    9.8      530.0       3
+ 7        1            0.052        1.0        3    0.049    9.9      542.0       3
+ 8        1            0.036        1.0        3    0.03     10.0     537.0       3    ← settling back
+ 9        1            0.023        1.0        3    0.018    10.1     553.0       3
+10        1            0.014        1.0        3    0.011    10.1     539.0       3    ← nearly still again
+```
+
+**What you can see:**
+- `person_count` = 1 the whole time (one person in view)
+- `group_jitter` jumped from 0.0 to 0.052 on line 5 (person moved slightly), then faded back down
+- `jitter` (per-person) mirrors this — peaked at 0.074, decayed to 0.011
+- `stillness` kept counting up (9.3 → 10.1 seconds) because the movement was too small to reset it
+- `depth_mm` hovers around 522-553mm (person ~0.5m below the ceiling camera)
+- `micro_motion` stayed at 1.0 (high scene-level motion from depth noise at this distance)
+- `cluster_id` = 3 (this person's cluster, only one group since only one person)
 
 
 ### Field reference — Group level (top-level fields)
