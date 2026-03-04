@@ -40,24 +40,65 @@ Attach a callback to the Web Client DAT to extract the values you need:
 ```python
 import json
 
-def onReceiveText(dat, rowIndex, message, bytes, peer):
-    data = json.loads(message)
+# This version is "future-proof" and version-independent
+def onReceiveText(dat, rowIndex, message, *args):
+    # 1. Update a text DAT for visual debugging
+    if op('text1'):
+        op('text1').text = message
+    
+    try:
+        # 2. Parse the incoming JSON string
+        data = json.loads(message)
+        
+        # 3. Safely extract nested data (primary and group)
+        # We use .get() and 'or {}' so the script doesn't crash if a person is missing
+        primary = data.get('primary') or {}
+        group = data.get('group') or {}
+        
+        # 4. Map the data into a flat structure for your table
+        channels = {
+            "person_count": group.get('person_count', 0),
+            "jitter": group.get('jitter', 0),
+            "breathing_signal": primary.get('breathing_signal', 0),
+            "breathing_phase": primary.get('breathing_phase', "none"),
+            "bpm": primary.get('bpm', 0),
+            "chest_depth": primary.get('chest_depth_mm', 0),
+            "fps": data.get('fps', 0),
+            "audio_layers": group.get('audio_layers', 0)
+        }
 
-    # --- Primary person (closest to camera) ---
-    breathing_signal = data['primary']['breathing_signal']   # -1.0 to +1.0
-    breathing_phase  = data['primary']['breathing_phase']    # "inhale" / "exhale" / "hold"
-    bpm              = data['primary']['bpm']                # breaths per minute (~8-20)
-    chest_depth      = data['primary']['chest_depth_mm']     # raw depth in millimeters
+        # 5. Push data to the Table DAT named 'table1'
+        target = op('table1')
+        if target:
+            target.clear()
+            # Row 0: The Header Names (slider1, slider2 style)
+            target.appendRow(list(channels.keys()))
+            # Row 1: The actual Values
+            target.appendRow(list(channels.values()))
 
-    # --- Group (all people combined) ---
-    jitter        = data['group']['jitter']          # 0.0 (still) to 1.0 (restless)
-    person_count  = data['group']['person_count']    # how many people detected
-    audio_layers  = data['group']['audio_layers']    # how many audio layers active
+    except Exception as e:
+        # Errors will show up in the Text Port (Alt+T)
+        print(f"WebSocket Error: {e}")
 
-    # --- Route to your CHOPs / TOPs ---
-    # Example: push values into Constant CHOPs
-    op('breathing').par.value0 = breathing_signal
-    op('jitter').par.value0 = jitter
+# --- Required housekeeping callbacks ---
+
+def onConnect(dat):
+    print("Connected")
+
+def onDisconnect(dat):
+    print("Disconnected")
+
+def onReceiveBinary(dat, contents):
+    return
+
+def onReceivePing(dat, contents):
+    dat.sendPong(contents)
+
+def onReceivePong(dat, contents):
+    return
+
+def onMonitorMessage(dat, message):
+    return
 ```
 
 ### 3. Quick Test (Browser)
