@@ -26,34 +26,67 @@ No login, no VPN, no setup. Data flows as long as the tracking system is running
 ```python
 import json
 
-def onReceiveText(dat, rowIndex, message, bytes, peer):
-    data = json.loads(message)
+def onReceiveText(dat, rowIndex, message, *args):
+    # 1. Debugging: Update text1 with raw JSON
+    if op('text1'):
+        op('text1').text = message
+    
+    try:
+        # 2. Parse the JSON
+        data = json.loads(message)
+        persons = data.get('persons', [])
+        
+        # 3. Define the Target Table
+        target = op('table1')
+        if not target:
+            return
 
-    # --- Group level (3 values) ---
-    person_count  = data['person_count']      # int: 0+
-    group_jitter  = data['group_jitter']      # float: 0.0 - 1.0
-    active_layers = data['active_layers']     # int: 0 - 5
+        target.clear()
+        
+        # 4. Set Headers
+        # We include global data plus individual person data
+        headers = [
+            'person_count', 'group_jitter', 'active_layers', 
+            'p_id', 'p_jitter', 'p_stillness', 'p_depth'
+        ]
+        target.appendRow(headers)
+        
+        # 5. Global data values
+        p_count = data.get('person_count', 0)
+        g_jitter = data.get('group_jitter', 0)
+        a_layers = data.get('active_layers', 0)
 
-    # --- Per person (4 values each) ---
-    for p in data['persons']:
-        pid        = p['id']           # int: stable ID (1+)
-        jitter     = p['jitter']       # float: 0.0 - 1.0
-        stillness  = p['stillness']    # float: seconds (0.0+)
-        depth      = p['depth_mm']     # float: ~500 - 3000
+        # 6. Logic: If persons exist, create a row for each. If not, one row with 0s.
+        if persons:
+            for p in persons:
+                row = [
+                    p_count, 
+                    g_jitter, 
+                    a_layers,
+                    p.get('id', 0),
+                    p.get('jitter', 0),
+                    p.get('stillness', 0),
+                    p.get('depth_mm', 0)
+                ]
+                target.appendRow(row)
+        else:
+            # Placeholder row when no one is detected
+            target.appendRow([p_count, g_jitter, a_layers, 0, 0, 0, 0])
 
-    # --- Route to CHOPs ---
-    op('group_jitter').par.value0 = group_jitter
-    op('active_layers').par.value0 = active_layers
-    op('person_count').par.value0 = person_count
+    except Exception as e:
+        print(f"WebSocket Parsing Error: {e}")
 ```
 
-### 3. Quick Test (Browser)
+### 3. Create a table DAT
+
+The code above works by parsing the JSON Data and appending it to a DAT Table called `table1`, all columns in row 0 correspond to the header names and values below it. You can then feed these data values into a `DAT To CHOP` and use them as you see fit, for example using a ` for arbitrary choosing.
+
+### 4. Quick Test (Browser)
 
 ```javascript
 ws = new WebSocket("ws://82.112.226.90:3000");
 ws.onmessage = e => console.log(JSON.parse(e.data));
 ```
-
 
 ## Data Reference
 
