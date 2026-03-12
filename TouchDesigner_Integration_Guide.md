@@ -40,68 +40,62 @@ Attach a callback to the Web Client DAT to extract the values you need:
 ```python
 import json
 
-# This version is "future-proof" and version-independent
 def onReceiveText(dat, rowIndex, message, *args):
-    # 1. Update a text DAT for visual debugging
+    # 1. Debugging: Update text1 with raw JSON
     if op('text1'):
         op('text1').text = message
     
     try:
-        # 2. Parse the incoming JSON string
+        # 2. Parse the JSON
         data = json.loads(message)
+        persons = data.get('persons', [])
         
-        # 3. Safely extract nested data (primary and group)
-        # We use .get() and 'or {}' so the script doesn't crash if a person is missing
-        primary = data.get('primary') or {}
-        group = data.get('group') or {}
-        
-        # 4. Map the data into a flat structure for your table
-        channels = {
-            "person_count": group.get('person_count', 0),
-            "jitter": group.get('jitter', 0),
-            "breathing_signal": primary.get('breathing_signal', 0),
-            "breathing_phase": primary.get('breathing_phase', "none"),
-            "bpm": primary.get('bpm', 0),
-            "chest_depth": primary.get('chest_depth_mm', 0),
-            "fps": data.get('fps', 0),
-            "audio_layers": group.get('audio_layers', 0)
-        }
-
-        # 5. Push data to the Table DAT named 'table1'
+        # 3. Define the Target Table
         target = op('table1')
-        if target:
-            target.clear()
-            # Row 0: The Header Names (slider1, slider2 style)
-            target.appendRow(list(channels.keys()))
-            # Row 1: The actual Values
-            target.appendRow(list(channels.values()))
+        if not target:
+            return
+
+        target.clear()
+        
+        # 4. Set Headers
+        # We include global data plus individual person data
+        headers = [
+            'person_count', 'group_jitter', 'active_layers', 
+            'p_id', 'p_jitter', 'p_stillness', 'p_depth'
+        ]
+        target.appendRow(headers)
+        
+        # 5. Global data values
+        p_count = data.get('person_count', 0)
+        g_jitter = data.get('group_jitter', 0)
+        a_layers = data.get('active_layers', 0)
+
+        # 6. Logic: If persons exist, create a row for each. If not, one row with 0s.
+        if persons:
+            for p in persons:
+                row = [
+                    p_count, 
+                    g_jitter, 
+                    a_layers,
+                    p.get('id', 0),
+                    p.get('jitter', 0),
+                    p.get('stillness', 0),
+                    p.get('depth_mm', 0)
+                ]
+                target.appendRow(row)
+        else:
+            # Placeholder row when no one is detected
+            target.appendRow([p_count, g_jitter, a_layers, 0, 0, 0, 0])
 
     except Exception as e:
-        # Errors will show up in the Text Port (Alt+T)
-        print(f"WebSocket Error: {e}")
-
-# --- Required housekeeping callbacks ---
-
-def onConnect(dat):
-    print("Connected")
-
-def onDisconnect(dat):
-    print("Disconnected")
-
-def onReceiveBinary(dat, contents):
-    return
-
-def onReceivePing(dat, contents):
-    dat.sendPong(contents)
-
-def onReceivePong(dat, contents):
-    return
-
-def onMonitorMessage(dat, message):
-    return
+        print(f"WebSocket Parsing Error: {e}")
 ```
 
-### 3. Quick Test (Browser)
+### 3. Create a table DAT
+
+The code above works by parsing the JSON Data and appending it to a DAT Table called `table1`, all columns in row 0 correspond to the header names and values below it. You can then feed these data values into a `DAT To CHOP` and use them as you see fit, for example using a ` for arbitrary choosing.
+
+### 4. Optional - Quick Test via Browser
 
 If you want to verify data is flowing before opening TouchDesigner, open any browser console (`Cmd+Option+J` on Mac, `F12` on Windows) and paste:
 
@@ -111,7 +105,6 @@ ws.onmessage = e => console.log(JSON.parse(e.data));
 ```
 
 You should see objects streaming in the console.
-
 
 ## Data Reference
 
@@ -166,7 +159,6 @@ You should see objects streaming in the console.
 | Starting / Moving | Dark Purple, Deep Indigo |
 | Calming down | Cyan, Teal |
 | Deep calm (30s+) | Gold, Amber ("Golden State") |
-
 
 ## Files on Our End (for reference)
 
